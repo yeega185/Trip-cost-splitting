@@ -29,7 +29,7 @@
 
 ### 1. 下載專案
 ```bash
-git clone [https://github.com/你的帳號/Trip-cost-splitting.git](https://github.com/你的帳號/Trip-cost-splitting.git)
+git clone [https://github.com/yeega185/Trip-cost-splitting.git](https://github.com/yeega185/Trip-cost-splitting.git)
 cd Trip-cost-splitting
 ```
 ### 2. 設定 Firebase
