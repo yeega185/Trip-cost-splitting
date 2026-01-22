@@ -1,0 +1,841 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>旅行分帳 TripSplit</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['"Inter"', '"Noto Sans TC"', 'sans-serif'],
+                    },
+                    colors: {
+                        brand: { 50: '#f0f9ff', 100: '#e0f2fe', 500: '#0ea5e9', 600: '#0284c7', 900: '#0c4a6e' },
+                        surface: { 50: '#f8fafc', 100: '#f1f5f9', 200: '#e2e8f0', card: '#ffffff' },
+                        accent: { success: '#10b981', danger: '#ef4444', warn: '#f59e0b' }
+                    },
+                    boxShadow: {
+                        'soft': '0 4px 20px -2px rgba(0, 0, 0, 0.05)',
+                    }
+                }
+            }
+        }
+    </script>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+TC:wght@400;500;700&display=swap"
+        rel="stylesheet">
+    <style>
+        body {
+            background-color: #f8fafc;
+            color: #334155;
+        }
+
+        .scrollable-list {
+            max-height: 500px;
+            overflow-y: auto;
+            scrollbar-width: thin;
+            scrollbar-color: #cbd5e1 transparent;
+        }
+
+        .scrollable-list::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .scrollable-list::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .scrollable-list::-webkit-scrollbar-thumb {
+            background-color: #cbd5e1;
+            border-radius: 99px;
+        }
+
+        .tab-pill {
+            transition: all 0.2s ease;
+            color: #64748b;
+            font-weight: 500;
+        }
+
+        .tab-pill:hover {
+            color: #334155;
+        }
+
+        .tab-active-pill {
+            background-color: white;
+            color: #0ea5e9;
+            font-weight: 600;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.05);
+            transform: scale(1.02);
+        }
+
+        .input-modern {
+            background-color: #f1f5f9;
+            border: 1px solid transparent;
+            transition: all 0.2s;
+        }
+
+        .input-modern:focus {
+            background-color: white;
+            border-color: #e2e8f0;
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.15);
+        }
+
+        th.sortable {
+            cursor: pointer;
+            user-select: none;
+            transition: background 0.2s;
+        }
+
+        th.sortable:hover {
+            background-color: #f1f5f9;
+        }
+
+        .btn-bounce:active {
+            transform: scale(0.97);
+        }
+
+        /* Tooltip */
+        .tooltip {
+            position: relative;
+            display: inline-flex;
+            align-items: center;
+            cursor: help;
+        }
+
+        .tooltip .tooltiptext {
+            visibility: hidden;
+            width: 220px;
+            background-color: #1e293b;
+            color: #fff;
+            text-align: center;
+            border-radius: 8px;
+            padding: 8px;
+            font-size: 0.75rem;
+            position: absolute;
+            z-index: 50;
+            bottom: 130%;
+            left: 50%;
+            transform: translateX(-50%);
+            opacity: 0;
+            transition: opacity 0.2s;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        }
+
+        .tooltip:hover .tooltiptext {
+            visibility: visible;
+            opacity: 1;
+        }
+    </style>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import {
+            getFirestore, doc, setDoc, getDoc, onSnapshot, collection, query, addDoc,
+            serverTimestamp, deleteDoc
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        /* ====== 1) Firebase 設定 ====== */
+        import { firebaseConfig } from './config.js';
+
+        /* ====== 2) 全域狀態 ====== */
+        let app, db, auth;
+        let userId = 'loading';
+        let appId = localStorage.getItem("tripAppId") || "";
+        let tripMeta = { name: "", startDate: "", endDate: "", totalDays: 0, status: "open" };
+        let allParticipants = [];
+        let allExpenses = [];
+        let currentView = 'search';
+        let summarySortField = 'date';
+        let summarySortDir = 'asc';
+
+        const getSettingsDocRef = () => doc(db, `/artifacts/${appId}/public/data/settings`, 'trip_info');
+        const expensesPath = () => `/artifacts/${appId}/public/data/expenses`;
+        const getExpensesColRef = () => collection(db, expensesPath());
+        const fmtMoney = (n) => new Intl.NumberFormat('zh-TW', { style: 'decimal', minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(Number(n || 0));
+        const getName = (pid) => allParticipants.find(p => p.id === pid)?.name || pid;
+        const isClosed = () => tripMeta.status === 'closed';
+        const getDateByDayOffset = (startDateStr, dayIndex) => {
+            if (!startDateStr) return '????-??-??';
+            const date = new Date(startDateStr + 'T00:00:00');
+            date.setDate(date.getDate() + (dayIndex - 1));
+            const y = date.getFullYear();
+            const m = String(date.getMonth() + 1).padStart(2, '0');
+            const d = String(date.getDate()).padStart(2, '0');
+            return `${y}-${m}-${d}`;
+        };
+
+        /* ====== 3) 啟動 Firebase ====== */
+        if (Object.keys(firebaseConfig).length > 0) {
+            app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    userId = user.uid;
+                    document.getElementById('user-id-display').textContent = (appId ? `ID: ${appId}` : "");
+                    if (appId) {
+                        startSettingsListener(); startExpensesListener(); switchView('overview');
+                    } else { switchView('search'); }
+                } else { try { await signInAnonymously(auth); } catch (e) { console.error(e); } }
+            });
+        }
+
+        /* ====== 4) UI 切換 ====== */
+        window.switchView = (id) => {
+            currentView = id;
+            ['search', 'overview', 'history', 'summary'].forEach(v => {
+                const tab = document.getElementById('tab-' + v);
+                const view = document.getElementById('view-' + v);
+                tab.classList.remove('tab-active-pill', 'shadow-sm');
+                tab.classList.add('hover:bg-gray-200');
+                view.classList.add('hidden');
+            });
+            const activeTab = document.getElementById('tab-' + id);
+            activeTab.classList.add('tab-active-pill');
+            activeTab.classList.remove('hover:bg-gray-200');
+            document.getElementById('view-' + id).classList.remove('hidden');
+
+            if (id === 'overview') renderOverviewPage(allExpenses);
+            if (id === 'history') renderHistoryPage(allExpenses);
+            if (id === 'summary') renderSummaryPage(allExpenses);
+        };
+
+        /* ====== 5) 邏輯: 搜尋/新增 ====== */
+        window.searchTrip = async () => {
+            const name = document.getElementById('search-name').value.trim();
+            const start = document.getElementById('search-start').value;
+            const end = document.getElementById('search-end').value;
+            if (!name || !start || !end) return showModal('請填寫完整資訊');
+            const id = "trip-" + name;
+            try {
+                const snap = await getDoc(doc(db, `/artifacts/${id}/public/data/settings`, 'trip_info'));
+                if (!snap.exists()) return showModal('找不到旅程', 'error');
+                const d = snap.data();
+                if (d.startDate !== start || d.endDate !== end) return showModal('日期不符', 'error');
+                localStorage.setItem('tripAppId', id); appId = id;
+                showModal(`歡迎回來：${d.name}`, 'success');
+                startSettingsListener(); startExpensesListener(); switchView('overview');
+            } catch (e) { showModal(e.message, 'error'); }
+        };
+
+        window.createTrip = async () => {
+            const name = document.getElementById('new-name').value.trim();
+            const start = document.getElementById('new-start').value;
+            const end = document.getElementById('new-end').value;
+            if (!name || !start || !end) return showModal('請填寫完整資訊');
+            if (end < start) return showModal('結束日錯誤', 'error');
+            const id = "trip-" + name;
+            const totalDays = Math.round((new Date(end) - new Date(start)) / 86400000) + 1;
+            try {
+                const ref = doc(db, `/artifacts/${id}/public/data/settings`, 'trip_info');
+                const snap = await getDoc(ref);
+                if (snap.exists()) return showModal('名稱已存在', 'error');
+                await setDoc(ref, {
+                    name, startDate: start, endDate: end, totalDays, status: 'open',
+                    participants: [], createdAt: serverTimestamp(), createdBy: userId
+                });
+                localStorage.setItem('tripAppId', id); appId = id;
+                showModal('建立成功', 'success');
+                startSettingsListener(); startExpensesListener(); switchView('overview');
+            } catch (e) { showModal(e.message, 'error'); }
+        };
+
+        /* ====== 6) 監聽 ====== */
+        const startSettingsListener = () => {
+            onSnapshot(getSettingsDocRef(), (snap) => {
+                if (!snap.exists()) return;
+                const d = snap.data();
+                tripMeta = { ...d, totalDays: Number(d.totalDays || 0) };
+                allParticipants = d.participants || [];
+                document.getElementById('current-trip-title').textContent = tripMeta.name;
+                document.getElementById('current-trip-meta').textContent = `${tripMeta.startDate} ~ ${tripMeta.endDate} (${tripMeta.totalDays}天)`;
+                updateUI();
+            });
+        };
+        const startExpensesListener = () => {
+            onSnapshot(query(getExpensesColRef()), (snap) => {
+                const arr = [];
+                snap.forEach(d => arr.push({ id: d.id, ...d.data() }));
+                allExpenses = arr;
+                updateUI();
+            });
+        };
+
+        /* ====== 7) 參與者管理 ====== */
+        window.addParticipant = async () => {
+            const name = document.getElementById('new-participant-name').value.trim();
+            const shares = parseInt(document.getElementById('new-participant-shares').value);
+            if (!name || shares <= 0) return showModal('格式錯誤');
+            if (allParticipants.some(p => p.name === name)) return showModal('名字重複', 'error');
+            const newId = "P" + Math.random().toString(36).substring(2, 8).toUpperCase();
+            await setDoc(getSettingsDocRef(), { participants: [...allParticipants, { id: newId, name, shares }] }, { merge: true });
+            document.getElementById('new-participant-name').value = '';
+            showModal(`新增：${name}`, 'success');
+        };
+
+        window.removeParticipant = async (pid) => {
+            if (allExpenses.some(x => x.payer === pid || (x.participants || []).includes(pid))) return showModal('此人有帳務記錄', 'error');
+            await setDoc(getSettingsDocRef(), { participants: allParticipants.filter(p => p.id !== pid) }, { merge: true });
+            showModal('已移除', 'success');
+        };
+
+        /* ====== 8) 記帳 ====== */
+        window.toggleParticipants = (force) => {
+            document.querySelectorAll('input[name="participants"]').forEach(b => b.checked = force);
+            checkSplitStatus();
+        };
+
+        window.checkSplitStatus = () => {
+            const payerId = document.getElementById('expense-payer').value;
+            const checkedBoxes = Array.from(document.querySelectorAll('input[name="participants"]:checked'));
+            const msgEl = document.getElementById('split-hint-msg');
+            if (!payerId) { msgEl.textContent = ''; return; }
+            if (checkedBoxes.length === 0) {
+                msgEl.innerHTML = '<span class="text-accent-danger font-medium">請選擇分攤者</span>';
+            } else if (checkedBoxes.some(cb => cb.value === payerId)) {
+                msgEl.innerHTML = checkedBoxes.length === 1 ? '<span class="text-gray-400">自用</span>' : '<span class="text-brand-500 font-medium">大家平分</span>';
+            } else {
+                const names = checkedBoxes.map(cb => allParticipants.find(ap => ap.id === cb.value)?.name).join('、');
+                msgEl.innerHTML = `<span class="text-accent-success font-bold">幫 ${names} 代墊</span>`;
+            }
+        };
+
+        window.addExpense = async () => {
+            const desc = document.getElementById('expense-description').value.trim();
+            const amt = parseFloat(document.getElementById('expense-amount').value);
+            const day = parseInt(document.getElementById('expense-trip-day').value);
+            const payer = document.getElementById('expense-payer').value;
+            const participants = Array.from(document.querySelectorAll('input[name="participants"]:checked')).map(cb => cb.value);
+            if (!desc || amt <= 0 || !day || !payer || participants.length === 0) return showModal('請完整填寫');
+            if (isClosed()) return showModal('已結清', 'error');
+            const date = getDateByDayOffset(tripMeta.startDate, day);
+            await addDoc(getExpensesColRef(), {
+                description: desc, amount: amt, date, tripDay: day, payer, participants,
+                splitType: 'shares', timestamp: serverTimestamp(), addedBy: userId
+            });
+            document.getElementById('expense-form').reset();
+            document.querySelectorAll('input[name="participants"]').forEach(cb => cb.checked = true);
+            document.getElementById('split-hint-msg').textContent = '';
+            showModal('已新增', 'success');
+        };
+
+        window.deleteExpense = async (id) => {
+            if (isClosed()) return showModal('已結清');
+            if (confirm('確定刪除？')) { await deleteDoc(doc(db, expensesPath(), id)); showModal('刪除成功', 'success'); }
+        };
+
+        window.closeTrip = async () => {
+            if (confirm('確定結清？')) { await setDoc(getSettingsDocRef(), { status: 'closed' }, { merge: true }); showModal('已結清', 'success'); }
+        };
+
+        /* ====== 10) 核心邏輯 ====== */
+        const calcBalances = (expenses) => {
+            const map = {}; allParticipants.forEach(p => map[p.id] = 0);
+            expenses.forEach(exp => {
+                const amount = Number(exp.amount) || 0; const payer = exp.payer;
+                if (typeof map[payer] === 'undefined') map[payer] = 0;
+                const ids = exp.participants || []; const entities = allParticipants.filter(x => ids.includes(x.id));
+                let shareSum = 0; entities.forEach(x => shareSum += Number(x.shares || 0));
+                if (shareSum <= 0) return;
+                const perShare = amount / shareSum;
+                map[payer] += amount; entities.forEach(x => { map[x.id] -= (x.shares * perShare); });
+            });
+            return map;
+        };
+
+        // 最小交易次數 (最佳化)
+        const calcSettlement = (balanceMap) => {
+            const arr = Object.keys(balanceMap).map(pid => ({ id: pid, name: getName(pid), balance: balanceMap[pid] })).filter(x => Math.abs(x.balance) > 0.01);
+            let debt = arr.filter(x => x.balance < 0).map(x => ({ ...x, amount: Math.abs(x.balance) }));
+            let cred = arr.filter(x => x.balance > 0).map(x => ({ ...x, amount: x.balance }));
+            debt.sort((a, b) => b.amount - a.amount); cred.sort((a, b) => b.amount - a.amount);
+            const res = []; let i = 0, j = 0;
+            while (i < cred.length && j < debt.length) {
+                let amt = Math.min(cred[i].amount, debt[j].amount); amt = Math.round(amt * 100) / 100;
+                if (amt <= 0.001) { if (cred[i].amount < debt[j].amount) i++; else j++; continue; }
+                res.push({ from: debt[j].id, to: cred[i].id, fromName: debt[j].name, toName: cred[i].name, amount: amt });
+                cred[i].amount -= amt; debt[j].amount -= amt;
+                if (cred[i].amount < 0.01) i++; if (debt[j].amount < 0.01) j++;
+            }
+            return res;
+        };
+
+        // 原始欠款 (直觀)
+        const calcPairwiseDebts = (expenses) => {
+            const debts = {};
+            expenses.forEach(exp => {
+                const amount = Number(exp.amount) || 0; const payer = exp.payer;
+                const ids = exp.participants || []; const entities = allParticipants.filter(x => ids.includes(x.id));
+                let shareSum = 0; entities.forEach(x => shareSum += Number(x.shares || 0));
+                if (shareSum <= 0) return;
+                const perShare = amount / shareSum;
+                entities.forEach(user => {
+                    if (user.id === payer) return;
+                    const myShare = user.shares * perShare;
+                    const key = `${user.id}_${payer}`; debts[key] = (debts[key] || 0) + myShare;
+                });
+            });
+            const result = []; const pairs = new Set();
+            Object.keys(debts).forEach(k => { const [from, to] = k.split('_'); pairs.add([from, to].sort().join('_')); });
+            pairs.forEach(pKey => {
+                const [u1, u2] = pKey.split('_');
+                const d1 = debts[`${u1}_${u2}`] || 0; const d2 = debts[`${u2}_${u1}`] || 0;
+                if (d1 > d2) { const net = d1 - d2; if (net > 0.01) result.push({ from: u1, to: u2, fromName: getName(u1), toName: getName(u2), amount: net }); }
+                else { const net = d2 - d1; if (net > 0.01) result.push({ from: u2, to: u1, fromName: getName(u2), toName: getName(u1), amount: net }); }
+            });
+            return result.sort((a, b) => b.amount - a.amount);
+        };
+
+        /* ====== 11) 渲染 (Modern UI) ====== */
+        const renderParticipantControls = () => {
+            const payerSel = document.getElementById('expense-payer');
+            const checksDiv = document.getElementById('participant-checkboxes');
+            const listDiv = document.getElementById('current-participants-list');
+
+            payerSel.innerHTML = '<option value="">-- 誰先付錢？ --</option>';
+            payerSel.onchange = checkSplitStatus;
+            allParticipants.forEach(p => { payerSel.insertAdjacentHTML('beforeend', `<option value="${p.id}">${p.name}</option>`); });
+
+            checksDiv.innerHTML = `
+                <div class="col-span-full flex justify-between items-center mb-3 pb-2 border-b border-gray-100">
+                    <div class="space-x-1">
+                        <button type="button" onclick="toggleParticipants(true)" class="text-xs bg-surface-100 text-slate-600 px-3 py-1 rounded-full hover:bg-surface-200 transition">全選</button>
+                        <button type="button" onclick="toggleParticipants(false)" class="text-xs bg-surface-100 text-slate-600 px-3 py-1 rounded-full hover:bg-surface-200 transition">全不選</button>
+                    </div>
+                    <div id="split-hint-msg" class="text-xs"></div>
+                </div>
+            `;
+            allParticipants.forEach(p => {
+                checksDiv.insertAdjacentHTML('beforeend', `
+                    <label class="inline-flex items-center p-2 rounded-lg border border-transparent hover:bg-surface-50 cursor-pointer transition">
+                        <input type="checkbox" name="participants" value="${p.id}" checked class="h-4 w-4 text-brand-500 rounded border-gray-300 focus:ring-brand-500" onchange="checkSplitStatus()">
+                        <span class="ml-2 text-sm text-slate-700">${p.name}</span>
+                    </label>
+                `);
+            });
+
+            listDiv.innerHTML = '';
+            if (allParticipants.length === 0) listDiv.innerHTML = '<div class="text-sm text-gray-400 italic py-2">尚未新增</div>';
+            else allParticipants.forEach(p => {
+                listDiv.insertAdjacentHTML('beforeend', `
+                    <div class="flex justify-between items-center px-3 py-2 bg-surface-50 rounded-lg mb-2">
+                        <span class="font-medium text-slate-700 text-sm">${p.name} <span class="text-xs text-gray-400">(${p.shares}股)</span></span>
+                        <button onclick="removeParticipant('${p.id}')" class="text-xs text-gray-400 hover:text-accent-danger transition">移除</button>
+                    </div>
+                `);
+            });
+        };
+
+        window.refreshSettlement = () => {
+            renderOverviewPage(allExpenses);
+            const btn = document.querySelector('#refresh-btn');
+            if (btn) {
+                const org = btn.innerHTML;
+                btn.innerHTML = '<span class="text-accent-success">✓ 已更新</span>';
+                setTimeout(() => btn.innerHTML = org, 1000);
+            }
+        };
+
+        function renderOverviewPage(expenses) {
+            const form = document.getElementById('expense-form');
+            const disabled = !appId || allParticipants.length === 0 || tripMeta.totalDays <= 0 || isClosed();
+            form.querySelectorAll('input,select,button').forEach(x => x.disabled = disabled);
+
+            const selDay = document.getElementById('expense-trip-day');
+            selDay.innerHTML = '<option value="">-- 第幾天？ --</option>';
+            for (let i = 1; i <= tripMeta.totalDays; i++) {
+                selDay.insertAdjacentHTML('beforeend', `<option value="${i}">第 ${i} 天 (${getDateByDayOffset(tripMeta.startDate, i)})</option>`);
+            }
+
+            renderParticipantControls();
+
+            // 結算區塊
+            const balanceMap = calcBalances(expenses);
+            let total = expenses.reduce((sum, x) => sum + Number(x.amount || 0), 0);
+            document.getElementById('overview-total-expenses').textContent = `NT$ ${fmtMoney(total)}`;
+
+            const suggestions = calcSettlement(balanceMap);
+            const directDebts = calcPairwiseDebts(expenses);
+
+            // 1. 直觀債務 (主角 - Main)
+            document.getElementById('overview-direct-debt-summary').innerHTML = directDebts.length ? directDebts.map(s => `
+                <div class="p-3 bg-white border border-surface-200 rounded-xl flex items-center justify-between mb-2 shadow-sm">
+                    <div class="flex items-center gap-2 text-sm text-slate-700">
+                        <span class="font-bold text-slate-800">${s.fromName}</span>
+                        <span class="text-gray-400 text-xs px-1 bg-surface-100 rounded">欠</span>
+                        <span class="font-bold text-slate-800">${s.toName}</span>
+                    </div>
+                    <span class="text-lg font-bold text-accent-danger">NT$ ${fmtMoney(s.amount)}</span>
+                </div>
+            `).join('') : '<div class="p-4 text-center text-sm text-gray-400 italic">目前無欠款記錄</div>';
+
+            // 2. 最小轉帳 (配角 - Secondary)
+            document.getElementById('overview-settlement-summary').innerHTML = suggestions.length ? suggestions.map(s => `
+                <div class="flex justify-between items-center py-1.5 text-xs text-slate-500">
+                    <span>${s.fromName} → ${s.toName}</span>
+                    <span class="font-mono">NT$ ${fmtMoney(s.amount)}</span>
+                </div>
+            `).join('') : '<div class="text-center text-xs text-gray-400">已結清</div>';
+        }
+
+        function renderHistoryPage(expenses) {
+            const list = document.getElementById('expenses-list-history');
+            document.getElementById('expense-count-history').textContent = expenses.length;
+            if (expenses.length === 0) { list.innerHTML = '<div class="p-8 text-center text-gray-400">還沒有記帳喔</div>'; return; }
+
+            const arr = [...expenses].sort((a, b) => (a.date < b.date ? 1 : -1));
+            list.innerHTML = '';
+            arr.forEach(exp => {
+                const payerName = getName(exp.payer);
+                const validMembers = (exp.participants || []).filter(pid => allParticipants.some(p => p.id === pid));
+                const isValid = validMembers.length > 0;
+                const membersStr = validMembers.map(getName).join('、');
+                const cardClass = isValid ? 'bg-white border-l-4 border-brand-500 hover:shadow-md' : 'bg-red-50 border-l-4 border-accent-danger';
+
+                list.insertAdjacentHTML('beforeend', `
+                    <div class="${cardClass} p-4 mb-3 rounded-xl shadow-sm border border-gray-100 transition-all group">
+                        <div class="flex justify-between items-start">
+                            <div class="flex-grow pr-4">
+                                <h4 class="text-lg font-bold text-slate-800">${exp.description}</h4>
+                                <div class="flex items-center gap-2 mt-1 text-xs text-gray-500">
+                                    <span class="bg-surface-100 px-2 py-0.5 rounded text-slate-600">Day ${exp.tripDay}</span>
+                                    <span>${exp.date}</span>
+                                </div>
+                                <div class="mt-2 text-sm text-slate-600 flex flex-col gap-1">
+                                    <div><span class="text-gray-400">支付：</span>${payerName} <span class="font-bold text-accent-danger">NT$ ${fmtMoney(exp.amount)}</span></div>
+                                    ${isValid
+                        ? `<div class="text-xs text-gray-500"><span class="text-gray-400">分攤：</span>${membersStr}</div>`
+                        : `<div class="text-xs text-accent-danger font-bold">⚠️ 錯誤：參與者已失效</div>`
+                    }
+                                </div>
+                            </div>
+                            <button onclick="deleteExpense('${exp.id}')" class="opacity-0 group-hover:opacity-100 transition p-2 text-gray-400 hover:text-accent-danger rounded-full hover:bg-red-50">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                            </button>
+                        </div>
+                    </div>
+                `);
+            });
+        }
+
+        window.setSummarySort = (field) => {
+            if (summarySortField === field) { summarySortDir = summarySortDir === 'asc' ? 'desc' : 'asc'; }
+            else { summarySortField = field; summarySortDir = 'asc'; }
+            renderSummaryPage(allExpenses);
+        };
+
+        function renderSummaryPage(expenses) {
+            document.getElementById('report-trip-day-display').textContent = tripMeta.startDate ? `${tripMeta.startDate} ~ ${tripMeta.endDate}` : '';
+            const arr = [...expenses].sort((a, b) => {
+                let valA, valB;
+                if (summarySortField === 'amount') { valA = Number(a.amount); valB = Number(b.amount); }
+                else if (summarySortField === 'payer') { valA = getName(a.payer); valB = getName(b.payer); }
+                else if (summarySortField === 'beneficiaries') { valA = (a.participants || []).map(getName).join(''); valB = (b.participants || []).map(getName).join(''); }
+                else { valA = a.date; valB = b.date; }
+                if (valA < valB) return summarySortDir === 'asc' ? -1 : 1;
+                if (valA > valB) return summarySortDir === 'asc' ? 1 : -1;
+                return 0;
+            });
+
+            const balanceMap = calcBalances(expenses);
+            const payerMap = {}; let grand = 0;
+            arr.forEach(x => { grand += Number(x.amount); payerMap[x.payer] = (payerMap[x.payer] || 0) + Number(x.amount); });
+
+            let html = `
+                <div class="col-span-full mb-6 p-6 rounded-2xl bg-gradient-to-r from-brand-900 to-brand-600 text-white shadow-lg flex justify-between items-center">
+                    <div>
+                        <div class="text-brand-100 text-sm font-medium mb-1">Total Spending</div>
+                        <div class="text-3xl font-bold">NT$ ${fmtMoney(grand)}</div>
+                    </div>
+                    <div class="text-right hidden sm:block">
+                        <div class="text-sm opacity-80">${tripMeta.name}</div>
+                        <div class="text-xs opacity-60">${arr.length} 筆紀錄</div>
+                    </div>
+                </div>`;
+
+            allParticipants.forEach(p => {
+                const paid = payerMap[p.id] || 0; const net = balanceMap[p.id] || 0;
+                const netClass = net >= 0 ? 'text-accent-success' : 'text-accent-danger';
+                const netText = net >= 0 ? `+${fmtMoney(net)}` : `-${fmtMoney(Math.abs(net))}`;
+                html += `
+                    <div class="p-5 rounded-2xl bg-white border border-surface-200 shadow-soft">
+                        <div class="flex justify-between items-center mb-2">
+                            <h3 class="font-bold text-slate-800">${p.name}</h3>
+                            <span class="text-sm font-bold ${netClass}">${netText}</span>
+                        </div>
+                        <div class="text-xs text-gray-400">墊付總額 <span class="text-slate-600 font-medium">NT$ ${fmtMoney(paid)}</span></div>
+                    </div>
+                `;
+            });
+            document.getElementById('report-category-summary-cards').innerHTML = html;
+
+            const getArrow = (f) => summarySortField === f ? (summarySortDir === 'asc' ? ' ↑' : ' ↓') : '';
+            const rows = arr.map(x => `
+                <tr class="hover:bg-surface-50 transition border-b border-surface-100 last:border-0">
+                    <td class="px-4 py-3 text-sm text-slate-700 font-medium font-mono">${x.date}</td>
+                    <td class="px-4 py-3 text-sm text-slate-600">${x.description}</td>
+                    <td class="px-4 py-3 text-sm text-right text-slate-600">${getName(x.payer)}</td>
+                    <td class="px-4 py-3 text-sm text-right text-gray-400 text-xs">${(x.participants || []).map(getName).join(' ')}</td>
+                    <td class="px-4 py-3 text-sm font-bold text-slate-800 text-right">NT$ ${fmtMoney(x.amount)}</td>
+                </tr>
+            `).join('');
+
+            document.getElementById('report-ledger-table').innerHTML = `
+                <div class="max-h-[500px] overflow-y-auto rounded-xl border border-surface-200 shadow-sm scrollable-list bg-white">
+                    <table class="min-w-full">
+                        <thead class="bg-surface-50 sticky top-0 z-10 border-b border-surface-200">
+                            <tr>
+                                <th onclick="setSummarySort('date')" class="sortable px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase">日期${getArrow('date')}</th>
+                                <th class="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase">用途</th>
+                                <th onclick="setSummarySort('payer')" class="sortable px-4 py-3 text-right text-xs font-bold text-slate-500 uppercase">支付者${getArrow('payer')}</th>
+                                <th onclick="setSummarySort('beneficiaries')" class="sortable px-4 py-3 text-right text-xs font-bold text-slate-500 uppercase">被支付人${getArrow('beneficiaries')}</th>
+                                <th onclick="setSummarySort('amount')" class="sortable px-4 py-3 text-right text-xs font-bold text-slate-500 uppercase">金額${getArrow('amount')}</th>
+                            </tr>
+                        </thead>
+                        <tbody>${rows}</tbody>
+                    </table>
+                </div>
+            `;
+        }
+
+        const updateUI = () => { renderOverviewPage(allExpenses); renderHistoryPage(allExpenses); renderSummaryPage(allExpenses); switchView(currentView); };
+        window.showModal = (msg, type = 'info') => {
+            const m = document.getElementById('custom-modal');
+            const h = document.getElementById('modal-header');
+            h.className = `text-lg font-bold p-4 rounded-t-xl text-white ${type === 'success' ? 'bg-accent-success' : type === 'error' ? 'bg-accent-danger' : 'bg-brand-500'}`;
+            h.textContent = type === 'success' ? '成功' : type === 'error' ? '錯誤' : '提示';
+            document.getElementById('modal-message').textContent = msg;
+            m.classList.remove('hidden');
+        };
+        window.closeModal = () => document.getElementById('custom-modal').classList.add('hidden');
+    </script>
+</head>
+
+<body class="antialiased min-h-screen pb-10">
+
+    <div id="custom-modal"
+        class="hidden fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 transition-all">
+        <div class="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden transform scale-100 transition-all">
+            <div id="modal-header" class="text-lg font-bold p-4 text-white bg-brand-500">提示</div>
+            <div class="p-6">
+                <p id="modal-message" class="text-slate-600 mb-6 text-base leading-relaxed"></p>
+                <button onclick="closeModal()"
+                    class="w-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold py-3 px-4 rounded-xl transition btn-bounce">知道了</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="main-container" class="max-w-5xl mx-auto pt-8 px-4 sm:px-6">
+
+        <header class="flex flex-col md:flex-row justify-between items-center mb-8 gap-4">
+            <div class="text-center md:text-left">
+                <h1 class="text-2xl font-extrabold text-slate-800 tracking-tight">TripSplit <span
+                        class="text-brand-500">.</span></h1>
+                <p class="text-xs text-gray-400 mt-1 font-mono" id="user-id-display">Connecting...</p>
+            </div>
+            <nav class="bg-surface-200 p-1 rounded-full inline-flex relative shadow-inner">
+                <button id="tab-search" onclick="switchView('search')"
+                    class="tab-pill px-5 py-2 rounded-full text-sm">旅程</button>
+                <button id="tab-overview" onclick="switchView('overview')"
+                    class="tab-pill px-5 py-2 rounded-full text-sm">記帳</button>
+                <button id="tab-history" onclick="switchView('history')"
+                    class="tab-pill px-5 py-2 rounded-full text-sm">明細</button>
+                <button id="tab-summary" onclick="switchView('summary')"
+                    class="tab-pill px-5 py-2 rounded-full text-sm">報表</button>
+            </nav>
+        </header>
+
+        <section id="view-search" class="hidden animate-fade-in">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                <div class="bg-white p-8 rounded-3xl shadow-soft border border-surface-100">
+                    <h2 class="text-xl font-bold mb-6 text-slate-800">🔍 搜尋旅程</h2>
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-xs font-bold text-gray-400 uppercase mb-1 ml-1">Trip ID</label>
+                            <input id="search-name" class="input-modern w-full p-3 rounded-xl text-slate-700"
+                                placeholder="例如：Taipei2024" />
+                        </div>
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-xs font-bold text-gray-400 uppercase mb-1 ml-1">Start
+                                    Date</label>
+                                <input id="search-start" type="date"
+                                    class="input-modern w-full p-3 rounded-xl text-slate-700" />
+                            </div>
+                            <div>
+                                <label class="block text-xs font-bold text-gray-400 uppercase mb-1 ml-1">End
+                                    Date</label>
+                                <input id="search-end" type="date"
+                                    class="input-modern w-full p-3 rounded-xl text-slate-700" />
+                            </div>
+                        </div>
+                        <button onclick="searchTrip()"
+                            class="w-full mt-4 bg-brand-600 hover:bg-brand-500 text-white font-bold py-3.5 rounded-xl shadow-lg shadow-brand-500/30 transition btn-bounce">進入旅程</button>
+                    </div>
+                </div>
+
+                <div class="bg-white p-8 rounded-3xl shadow-soft border border-surface-100 relative overflow-hidden">
+                    <div class="absolute top-0 right-0 w-24 h-24 bg-accent-success/10 rounded-bl-full -mr-4 -mt-4">
+                    </div>
+                    <h2 class="text-xl font-bold mb-6 text-slate-800">✨ 建立新旅程</h2>
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-xs font-bold text-gray-400 uppercase mb-1 ml-1">Name</label>
+                            <input id="new-name" class="input-modern w-full p-3 rounded-xl text-slate-700"
+                                placeholder="旅程名稱 (英文/數字)" />
+                        </div>
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-xs font-bold text-gray-400 uppercase mb-1 ml-1">Start</label>
+                                <input id="new-start" type="date"
+                                    class="input-modern w-full p-3 rounded-xl text-slate-700" />
+                            </div>
+                            <div>
+                                <label class="block text-xs font-bold text-gray-400 uppercase mb-1 ml-1">End</label>
+                                <input id="new-end" type="date"
+                                    class="input-modern w-full p-3 rounded-xl text-slate-700" />
+                            </div>
+                        </div>
+                        <button onclick="createTrip()"
+                            class="w-full mt-4 bg-white border-2 border-slate-100 hover:border-brand-500 hover:text-brand-600 text-slate-600 font-bold py-3.5 rounded-xl transition btn-bounce">建立並開始</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="view-overview" class="hidden grid grid-cols-1 lg:grid-cols-12 gap-8">
+            <div class="lg:col-span-7 space-y-6">
+                <div class="bg-brand-900 text-white p-6 rounded-3xl shadow-lg relative overflow-hidden">
+                    <div class="absolute right-0 top-0 w-32 h-32 bg-white/5 rounded-full blur-2xl -mr-10 -mt-10"></div>
+                    <div class="relative z-10">
+                        <div class="flex justify-between items-start">
+                            <div>
+                                <h2 id="current-trip-title" class="text-2xl font-bold">Loading...</h2>
+                                <p id="current-trip-meta" class="text-brand-100 text-sm mt-1 opacity-80"></p>
+                            </div>
+                            <button onclick="closeTrip()"
+                                class="text-xs bg-white/10 hover:bg-white/20 text-white px-3 py-1.5 rounded-lg backdrop-blur-sm transition">結清</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="bg-white p-6 sm:p-8 rounded-3xl shadow-soft border border-surface-100">
+                    <h3 class="text-lg font-bold text-slate-800 mb-6 flex items-center gap-2">
+                        <span class="bg-brand-100 text-brand-600 p-1.5 rounded-lg text-sm">✎</span> 新增支出
+                    </h3>
+                    <form id="expense-form" onsubmit="event.preventDefault(); addExpense();" class="space-y-5">
+                        <input id="expense-description"
+                            class="input-modern w-full p-4 rounded-xl text-lg font-medium placeholder-gray-400"
+                            placeholder="買了什麼？ (例如：晚餐)" />
+
+                        <div class="grid grid-cols-2 gap-4">
+                            <div class="relative">
+                                <span class="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 font-bold">$</span>
+                                <input id="expense-amount" type="number" step="0.01"
+                                    class="input-modern w-full p-4 pl-8 rounded-xl font-mono text-lg text-slate-700"
+                                    placeholder="0.00" />
+                            </div>
+                            <select id="expense-trip-day"
+                                class="input-modern w-full p-4 rounded-xl text-slate-700 bg-white appearance-none cursor-pointer"></select>
+                        </div>
+
+                        <div class="p-5 bg-surface-50 rounded-2xl border border-surface-100">
+                            <select id="expense-payer"
+                                class="w-full bg-transparent font-bold text-brand-600 border-b border-dashed border-brand-300 pb-1 mb-4 focus:outline-none cursor-pointer"></select>
+
+                            <p class="text-xs font-bold text-gray-400 uppercase mb-3">分攤給誰？</p>
+                            <div id="participant-checkboxes" class="grid grid-cols-2 sm:grid-cols-3 gap-2"></div>
+                        </div>
+
+                        <button type="submit"
+                            class="w-full bg-brand-600 hover:bg-brand-500 text-white font-bold py-4 rounded-xl shadow-lg shadow-brand-500/20 transition btn-bounce">
+                            確認記帳
+                        </button>
+                    </form>
+                </div>
+            </div>
+
+            <div class="lg:col-span-5 space-y-6">
+                <div class="bg-white p-6 rounded-3xl shadow-soft border border-surface-100">
+                    <h3 class="text-sm font-bold text-slate-400 uppercase mb-4">參與者</h3>
+                    <div id="current-participants-list" class="space-y-2 mb-4"></div>
+                    <div class="flex gap-2">
+                        <input id="new-participant-name" placeholder="名字"
+                            class="input-modern flex-grow p-2.5 rounded-xl text-sm" />
+                        <input type="number" id="new-participant-shares" value="1"
+                            class="input-modern w-16 p-2.5 rounded-xl text-center text-sm" />
+                        <button onclick="addParticipant()"
+                            class="bg-surface-800 text-white px-3 rounded-xl hover:bg-black transition">+</button>
+                    </div>
+                </div>
+
+                <div class="bg-white p-6 rounded-3xl shadow-soft border border-surface-100">
+                    <div class="flex justify-between items-center mb-4 border-b border-surface-100 pb-3">
+                        <div>
+                            <h3 class="text-lg font-bold text-slate-800">結算建議</h3>
+                            <p class="text-xs text-gray-400 mt-0.5">總支出: <span id="overview-total-expenses"
+                                    class="font-mono text-slate-600">NT$ 0</span></p>
+                        </div>
+                        <button id="refresh-btn" onclick="refreshSettlement()"
+                            class="text-xs bg-surface-50 hover:bg-surface-100 text-slate-500 px-3 py-1.5 rounded-lg transition flex items-center gap-1 border border-surface-200">
+                            ⟳ 更新
+                        </button>
+                    </div>
+
+                    <div class="space-y-6">
+                        <div>
+                            <div class="flex items-center gap-2 mb-3">
+                                <span class="text-xs font-bold text-slate-500 uppercase tracking-wider">📋 原始帳務
+                                    (誰欠誰多少)</span>
+                            </div>
+                            <div id="overview-direct-debt-summary"
+                                class="space-y-2 max-h-60 overflow-y-auto pr-1 scrollable-list"></div>
+                        </div>
+
+                        <div class="pt-4 border-t border-dashed border-gray-200">
+                            <div class="flex items-center gap-2 mb-2">
+                                <span class="text-xs font-bold text-gray-400 uppercase tracking-wider">💡
+                                    進階：最小轉帳路徑</span>
+                                <div class="tooltip">
+                                    <span class="text-gray-300 text-xs">ⓘ</span>
+                                    <span class="tooltiptext">此方案會自動抵銷多方債務（例如 A欠B、B欠C → A直接還C），用最少筆數結清所有帳。</span>
+                                </div>
+                            </div>
+                            <div id="overview-settlement-summary"
+                                class="space-y-1 opacity-75 hover:opacity-100 transition duration-300"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="view-history" class="hidden max-w-3xl mx-auto">
+            <div class="flex justify-between items-end mb-6 px-2">
+                <h2 class="text-2xl font-bold text-slate-800">帳務明細</h2>
+                <span
+                    class="text-sm text-gray-500 bg-white px-3 py-1 rounded-full shadow-sm border border-surface-100">共
+                    <span id="expense-count-history" class="font-mono font-bold text-brand-600">0</span> 筆</span>
+            </div>
+            <div id="expenses-list-history" class="space-y-4 pb-12"></div>
+        </section>
+
+        <section id="view-summary" class="hidden">
+            <div class="flex justify-between items-center mb-8">
+                <h2 class="text-2xl font-bold text-slate-800">財務報表</h2>
+                <span id="report-trip-day-display" class="text-sm text-gray-400 font-mono"></span>
+            </div>
+            <div id="report-category-summary-cards" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+            </div>
+            <div id="report-ledger-table"></div>
+        </section>
+
+    </div>
+</body>
+
+</html>
