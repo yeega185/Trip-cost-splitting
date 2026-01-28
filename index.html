@@ -765,13 +765,17 @@
                 <div class="bg-white p-6 rounded-3xl shadow-soft border border-surface-100">
                     <h3 class="text-sm font-bold text-slate-400 uppercase mb-4">參與者</h3>
                     <div id="current-participants-list" class="space-y-2 mb-4"></div>
-                    <div class="flex gap-2">
+                    <div class="flex gap-2 h-11">
                         <input id="new-participant-name" placeholder="名字"
-                            class="input-modern flex-grow p-2.5 rounded-xl text-sm" />
+                            class="input-modern flex-grow min-w-0 px-3 rounded-xl text-sm" />
+
                         <input type="number" id="new-participant-shares" value="1"
-                            class="input-modern w-16 p-2.5 rounded-xl text-center text-sm" />
+                            class="input-modern w-14 flex-shrink-0 text-center rounded-xl text-sm" />
+
                         <button onclick="addParticipant()"
-                            class="bg-surface-800 text-white px-3 rounded-xl hover:bg-black transition">+</button>
+                            class="bg-slate-100 text-slate-900 hover:bg-black hover:text-white w-11 flex-shrink-0 rounded-xl transition flex items-center justify-center shadow-sm text-xl pb-1">
+                            +
+                        </button>
                     </div>
                 </div>
 
